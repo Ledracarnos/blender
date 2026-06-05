@@ -103,6 +103,8 @@ Object *BKE_view_layer_camera_find(const Main &bmain, const Scene *scene, ViewLa
  */
 ViewLayer *BKE_view_layer_find_from_collection(const Scene *scene, LayerCollection *lc);
 Base *BKE_view_layer_base_find(ViewLayer *view_layer, Object *ob);
+bool BKE_view_layer_base_is_excluded(const Base *base);
+void BKE_view_layer_base_set_exclude(ViewLayer *view_layer, Base *base, bool exclude);
 void BKE_view_layer_base_deselect_all(const Main &bmain,
                                       const Scene *scene,
                                       ViewLayer *view_layer);

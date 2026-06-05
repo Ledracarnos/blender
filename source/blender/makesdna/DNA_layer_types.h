@@ -171,6 +171,12 @@ enum eViewLayer_Flag : short {
 };
 ENUM_OPERATORS(eViewLayer_Flag)
 
+/* ViewLayerObject->flag */
+enum eViewLayerObject_Flag : short {
+  VIEW_LAYER_OBJECT_EXCLUDE = (1 << 0),
+};
+ENUM_OPERATORS(eViewLayerObject_Flag)
+
 struct Base {
   struct Base *next = nullptr, *prev = nullptr;
 
@@ -206,6 +212,14 @@ struct LayerCollection {
 
   unsigned short local_collections_bits = 0;
   short _pad2[3] = {};
+};
+
+struct ViewLayerObject {
+  struct ViewLayerObject *next = nullptr, *prev = nullptr;
+
+  struct Object *object = nullptr;
+  eViewLayerObject_Flag flag = {};
+  char _pad[6] = {};
 };
 
 /* Type containing EEVEE settings per view-layer */
@@ -268,6 +282,7 @@ struct ViewLayer {
 
   struct Material *mat_override = nullptr;
   struct World *world_override = nullptr;
+  ListBaseT<ViewLayerObject> object_settings = {nullptr, nullptr};
   /** Equivalent to data-blocks user-defined ID properties. */
   struct IDProperty *id_properties = nullptr;
   /** Equivalent to data-blocks system-defined ID properties. */

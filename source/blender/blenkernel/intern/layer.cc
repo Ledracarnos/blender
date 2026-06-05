@@ -113,6 +113,44 @@ static Base *object_base_new(Object *ob)
   return base;
 }
 
+static ViewLayerObject *view_layer_object_find(ViewLayer *view_layer, const Object *ob)
+{
+  return static_cast<ViewLayerObject *>(
+      BLI_findptr(&view_layer->object_settings, ob, offsetof(ViewLayerObject, object)));
+}
+
+static bool view_layer_object_flag_get(ViewLayer *view_layer,
+                                       const Object *ob,
+                                       const eViewLayerObject_Flag flag)
+{
+  const ViewLayerObject *view_layer_object = view_layer_object_find(view_layer, ob);
+  return view_layer_object != nullptr && (view_layer_object->flag & flag) != 0;
+}
+
+static void view_layer_object_flag_set(ViewLayer *view_layer,
+                                       Object *ob,
+                                       const eViewLayerObject_Flag flag,
+                                       const bool value)
+{
+  ViewLayerObject *view_layer_object = view_layer_object_find(view_layer, ob);
+
+  if (value) {
+    if (view_layer_object == nullptr) {
+      view_layer_object = MEM_new<ViewLayerObject>(__func__);
+      view_layer_object->object = ob;
+      BLI_addtail(&view_layer->object_settings, view_layer_object);
+    }
+    view_layer_object->flag |= flag;
+    id_lib_indirect_weak_link(&ob->id);
+  }
+  else if (view_layer_object != nullptr) {
+    view_layer_object->flag &= ~flag;
+    if (view_layer_object->flag == eViewLayerObject_Flag(0)) {
+      BLI_freelinkN(&view_layer->object_settings, view_layer_object);
+    }
+  }
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -291,6 +329,7 @@ void BKE_view_layer_free_object_content(ViewLayer *view_layer)
   view_layer->basact = nullptr;
 
   view_layer->object_bases.free_no_destruct();
+  view_layer->object_settings.free_no_destruct();
 
   MEM_delete(view_layer->object_bases_hash);
 
@@ -408,6 +447,20 @@ Base *BKE_view_layer_base_find(ViewLayer *view_layer, Object *ob)
   return view_layer->object_bases_hash->lookup_default(ob, nullptr);
 }
 
+bool BKE_view_layer_base_is_excluded(const Base *base)
+{
+  return (base->flag & BASE_EXCLUDE_FROM_VIEW_LAYER) != 0;
+}
+
+void BKE_view_layer_base_set_exclude(ViewLayer *view_layer, Base *base, const bool exclude)
+{
+  view_layer_object_flag_set(view_layer, base->object, VIEW_LAYER_OBJECT_EXCLUDE, exclude);
+  SET_FLAG_FROM_TEST(base->flag, exclude, BASE_EXCLUDE_FROM_VIEW_LAYER);
+  if (exclude && view_layer->basact == base) {
+    view_layer->basact = nullptr;
+  }
+}
+
 void BKE_view_layer_base_deselect_all(const Main &bmain, const Scene *scene, ViewLayer *view_layer)
 {
   BLI_assert(scene);
@@ -475,6 +528,14 @@ static void layer_lightgroup_copy_data(ViewLayer *view_layer_dst,
 
     lightgroup_dst = lightgroup_dst->next;
     lightgroup_src = lightgroup_src->next;
+  }
+}
+
+static void layer_objects_copy_data(ListBaseT<ViewLayerObject> *objects_dst,
+                                    const ListBaseT<ViewLayerObject> *objects_src)
+{
+  if (objects_src != nullptr) {
+    BLI_duplicatelist(objects_dst, objects_src);
   }
 }
 
@@ -549,6 +610,9 @@ void BKE_view_layer_copy_data(Scene *scene_dst,
   LayerCollection *lc_scene_dst = static_cast<LayerCollection *>(
       view_layer_dst->layer_collections.first);
   lc_scene_dst->collection = scene_dst->master_collection;
+
+  view_layer_dst->object_settings.clear_no_delete();
+  layer_objects_copy_data(&view_layer_dst->object_settings, &view_layer_src->object_settings);
 
   view_layer_dst->aovs.clear_no_delete();
   layer_aov_copy_data(
@@ -1082,10 +1146,12 @@ static void layer_collection_objects_sync(ViewLayer *view_layer,
                                           ListBaseT<Base> *r_lb_new_object_bases,
                                           const short collection_restrict,
                                           const short layer_restrict,
-                                          const ushort local_collections_bits,
-                                          const bool parent_excluded)
+                                          const ushort local_collections_bits)
 {
-  const bool is_excluded = parent_excluded || ((layer->flag & LAYER_COLLECTION_EXCLUDE) != 0);
+  /* No need to sync objects if the collection is excluded. */
+  if ((layer->flag & LAYER_COLLECTION_EXCLUDE) != 0) {
+    return;
+  }
 
   for (CollectionObject &cob : layer->collection->gobject) {
     if (cob.ob == nullptr) {
@@ -1118,7 +1184,11 @@ static void layer_collection_objects_sync(ViewLayer *view_layer,
           return base;
         });
 
-    if (!is_excluded && (collection_restrict & COLLECTION_HIDE_VIEWPORT) == 0) {
+    const bool object_excluded = view_layer_object_flag_get(
+        view_layer, cob.ob, VIEW_LAYER_OBJECT_EXCLUDE);
+    SET_FLAG_FROM_TEST(base->flag, object_excluded, BASE_EXCLUDE_FROM_VIEW_LAYER);
+
+    if ((collection_restrict & COLLECTION_HIDE_VIEWPORT) == 0) {
       base->flag_from_collection |= (BASE_ENABLED_VIEWPORT |
                                      BASE_ENABLED_AND_MAYBE_VISIBLE_IN_VIEWPORT);
       if ((layer_restrict & LAYER_COLLECTION_HIDE) == 0) {
@@ -1129,15 +1199,15 @@ static void layer_collection_objects_sync(ViewLayer *view_layer,
       }
     }
 
-    if (!is_excluded && (collection_restrict & COLLECTION_HIDE_RENDER) == 0) {
+    if ((collection_restrict & COLLECTION_HIDE_RENDER) == 0) {
       base->flag_from_collection |= BASE_ENABLED_RENDER;
     }
 
     /* Holdout and indirect only */
-    if (!is_excluded && (layer->flag & LAYER_COLLECTION_HOLDOUT)) {
+    if (layer->flag & LAYER_COLLECTION_HOLDOUT) {
       base->flag_from_collection |= BASE_HOLDOUT;
     }
-    if (!is_excluded && (layer->flag & LAYER_COLLECTION_INDIRECT_ONLY)) {
+    if (layer->flag & LAYER_COLLECTION_INDIRECT_ONLY) {
       base->flag_from_collection |= BASE_INDIRECT_ONLY;
     }
 
@@ -1152,8 +1222,7 @@ static void layer_collection_sync(ViewLayer *view_layer,
                                   const eLayerCollection_Flag parent_layer_flag,
                                   const short parent_collection_restrict,
                                   const short parent_layer_restrict,
-                                  const ushort parent_local_collections_bits,
-                                  const bool parent_excluded)
+                                  const ushort parent_local_collections_bits)
 {
   /* This function assumes current 'parent' layer collection is already fully (re)synced and valid
    * regarding current Collection hierarchy.
@@ -1250,8 +1319,6 @@ static void layer_collection_sync(ViewLayer *view_layer,
       child_collection_restrict |= child_collection->flag;
       child_layer_restrict |= child_layer->flag;
     }
-    const bool child_excluded = parent_excluded || ((child_layer->flag & LAYER_COLLECTION_EXCLUDE) != 0);
-
     /* Sync child collections. */
     layer_collection_sync(view_layer,
                           child_layer_resync,
@@ -1260,12 +1327,11 @@ static void layer_collection_sync(ViewLayer *view_layer,
                           child_layer->flag,
                           child_collection_restrict,
                           child_layer_restrict,
-                          child_local_collections_bits,
-                          child_excluded);
+                          child_local_collections_bits);
 
     /* Layer collection exclude is not inherited. */
     child_layer->runtime_flag = {};
-    if (child_excluded) {
+    if (child_layer->flag & LAYER_COLLECTION_EXCLUDE) {
       continue;
     }
 
@@ -1300,8 +1366,7 @@ static void layer_collection_sync(ViewLayer *view_layer,
                                 r_lb_new_object_bases,
                                 parent_collection_restrict,
                                 parent_layer_restrict,
-                                parent_local_collections_bits,
-                                parent_excluded);
+                                parent_local_collections_bits);
 }
 
 #ifndef NDEBUG
@@ -1438,8 +1503,7 @@ bool BKE_layer_collection_sync(const Main &bmain, const Scene *scene, ViewLayer 
                         parent_exclude,
                         parent_restrict,
                         parent_layer_restrict,
-                        ~0,
-                        false);
+                        ~0);
 
   layer_collection_resync_unused_layers_free(view_layer, master_layer_resync);
   BLI_mempool_destroy(layer_resync_mempool);
@@ -2499,6 +2563,7 @@ void BKE_view_layer_blend_write(BlendWriter *writer,
   }
   writer->write_struct(view_layer);
   writer->write_struct_list(BKE_view_layer_object_bases_get(view_layer));
+  writer->write_struct_list(&view_layer->object_settings);
 
   if (view_layer->id_properties) {
     IDP_BlendWrite(writer, view_layer->id_properties);
@@ -2550,6 +2615,7 @@ void BKE_view_layer_blend_read_data(BlendDataReader *reader, ViewLayer *view_lay
   view_layer->stats = nullptr;
   BLO_read_struct_list(reader, Base, &view_layer->object_bases);
   BLO_read_struct(reader, Base, &view_layer->basact);
+  BLO_read_struct_list(reader, ViewLayerObject, &view_layer->object_settings);
 
   bool active_collection_found = false;
   BLO_read_struct(reader, LayerCollection, &view_layer->active_collection);
@@ -2592,6 +2658,12 @@ void BKE_view_layer_blend_read_after_liblink(BlendLibReader * /*reader*/,
       if (view_layer->basact == &base) {
         view_layer->basact = nullptr;
       }
+    }
+  }
+
+  for (ViewLayerObject &view_layer_object : view_layer->object_settings.items_mutable()) {
+    if (view_layer_object.object == nullptr) {
+      BLI_freelinkN(&view_layer->object_settings, &view_layer_object);
     }
   }
 }

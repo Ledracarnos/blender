@@ -311,6 +311,22 @@ static ViewLayer *rna_ViewLayer_find_with_base(Main *bmain, Scene *scene, Base *
   return nullptr;
 }
 
+static bool rna_ObjectBase_exclude_get(PointerRNA *ptr)
+{
+  Base *base = static_cast<Base *>(ptr->data);
+  return BKE_view_layer_base_is_excluded(base);
+}
+
+static void rna_ObjectBase_exclude_set(PointerRNA *ptr, bool value)
+{
+  Scene *scene = id_cast<Scene *>(ptr->owner_id);
+  Base *base = static_cast<Base *>(ptr->data);
+  ViewLayer *view_layer = rna_ViewLayer_find_with_base(G_MAIN, scene, base);
+  if (view_layer != nullptr) {
+    BKE_view_layer_base_set_exclude(view_layer, base, value);
+  }
+}
+
 static void rna_ObjectBase_exclude_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   Base *base = static_cast<Base *>(ptr->data);
@@ -679,7 +695,8 @@ static void rna_def_object_base(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_ObjectBase_hide_viewport_update");
 
   prop = RNA_def_property(srna, "exclude", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BASE_EXCLUDE_FROM_VIEW_LAYER);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_ObjectBase_exclude_get", "rna_ObjectBase_exclude_set");
   RNA_def_property_flag(prop, PROP_LIB_EXCEPTION);
   RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE); /* The update callback does tagging. */
   RNA_def_property_override_flag(prop, PROPOVERRIDE_OVERRIDABLE_LIBRARY);

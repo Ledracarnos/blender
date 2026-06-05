@@ -103,13 +103,13 @@ static void rna_LayerObjects_active_object_set(PointerRNA *ptr,
      * the G_MAIN, though in practice this is _probably_ not a very likely issue for now. */
     BKE_view_layer_synced_ensure(*G_MAIN, scene, view_layer);
     Base *basact_test = BKE_view_layer_base_find(view_layer, ob);
-    if (basact_test != nullptr) {
+    if (basact_test != nullptr && (basact_test->flag & BASE_EXCLUDE_FROM_VIEW_LAYER) == 0) {
       view_layer->basact = basact_test;
     }
     else {
       BKE_reportf(reports,
                   RPT_ERROR,
-                  "ViewLayer '%s' does not contain object '%s'",
+                  "ViewLayer '%s' does not contain enabled object '%s'",
                   view_layer->name,
                   ob->id.name + 2);
     }
@@ -192,10 +192,28 @@ static PointerRNA rna_ViewLayer_objects_get(CollectionPropertyIterator *iter)
   return RNA_id_pointer_create(reinterpret_cast<ID *>(base->object));
 }
 
+static bool rna_ViewLayer_objects_skip(CollectionPropertyIterator *iter, void * /*data*/)
+{
+  ListBaseIterator *internal = &iter->internal.listbase;
+  Base *base = reinterpret_cast<Base *>(internal->link);
+  return (base->flag & BASE_EXCLUDE_FROM_VIEW_LAYER) != 0;
+}
+
+static void rna_ViewLayer_objects_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  ViewLayer *view_layer = static_cast<ViewLayer *>(ptr->data);
+  rna_iterator_listbase_begin(
+      iter, ptr, BKE_view_layer_object_bases_get(view_layer), rna_ViewLayer_objects_skip);
+}
+
 static bool rna_ViewLayer_objects_selected_skip(CollectionPropertyIterator *iter, void * /*data*/)
 {
   ListBaseIterator *internal = &iter->internal.listbase;
   Base *base = reinterpret_cast<Base *>(internal->link);
+
+  if ((base->flag & BASE_EXCLUDE_FROM_VIEW_LAYER) != 0) {
+    return true;
+  }
 
   if ((base->flag & BASE_SELECTED) != 0) {
     return false;
@@ -278,6 +296,38 @@ static void rna_ObjectBase_hide_viewport_update(bContext *C, PointerRNA * /*ptr*
   BKE_view_layer_need_resync_tag(view_layer);
   DEG_id_tag_update(&scene->id, ID_RECALC_BASE_FLAGS);
   WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
+}
+
+static ViewLayer *rna_ViewLayer_find_with_base(Main *bmain, Scene *scene, Base *base)
+{
+  for (ViewLayer &view_layer : scene->view_layers) {
+    BKE_view_layer_synced_ensure(*bmain, scene, &view_layer);
+    for (Base &view_layer_base : *BKE_view_layer_object_bases_get(&view_layer)) {
+      if (&view_layer_base == base) {
+        return &view_layer;
+      }
+    }
+  }
+  return nullptr;
+}
+
+static void rna_ObjectBase_exclude_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  Base *base = static_cast<Base *>(ptr->data);
+  ViewLayer *view_layer = rna_ViewLayer_find_with_base(bmain, scene, base);
+
+  BKE_base_eval_flags(base);
+
+  DEG_id_tag_update(&scene->id, ID_RECALC_BASE_FLAGS);
+  DEG_id_tag_update(&base->object->id, ID_RECALC_ANIMATION);
+  DEG_relations_tag_update(bmain);
+
+  WM_main_add_notifier(NC_SCENE | ND_LAYER_CONTENT, nullptr);
+  WM_main_add_notifier(NC_IMAGE | ND_LAYER_CONTENT, nullptr);
+
+  if ((base->flag & BASE_EXCLUDE_FROM_VIEW_LAYER) != 0 && view_layer != nullptr) {
+    ed::object::base_active_refresh(bmain, scene, view_layer);
+  }
 }
 
 static void rna_LayerCollection_name_get(PointerRNA *ptr, char *value)
@@ -627,6 +677,16 @@ static void rna_def_object_base(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Hide in Viewport", "Temporarily hide in viewport");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_ObjectBase_hide_viewport_update");
+
+  prop = RNA_def_property(srna, "exclude", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BASE_EXCLUDE_FROM_VIEW_LAYER);
+  RNA_def_property_flag(prop, PROP_LIB_EXCEPTION);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE); /* The update callback does tagging. */
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_OVERRIDABLE_LIBRARY);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Exclude from View Layer", "Exclude object from view layer");
+  RNA_def_property_ui_icon(prop, ICON_CHECKBOX_HLT, -1);
+  RNA_def_property_update(prop, NC_SCENE | ND_LAYER, "rna_ObjectBase_exclude_update");
 }
 
 void RNA_def_view_layer(BlenderRNA *brna)
@@ -675,7 +735,7 @@ void RNA_def_view_layer(BlenderRNA *brna)
   RNA_def_property_collection_sdna(prop, nullptr, "object_bases", nullptr);
   RNA_def_property_struct_type(prop, "Object");
   RNA_def_property_collection_funcs(prop,
-                                    nullptr,
+                                    "rna_ViewLayer_objects_begin",
                                     nullptr,
                                     nullptr,
                                     "rna_ViewLayer_objects_get",

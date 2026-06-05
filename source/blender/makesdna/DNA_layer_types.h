@@ -93,6 +93,7 @@ enum eBase_Flag : short {
   /* User controlled flags. */
   BASE_SELECTED = (1 << 0), /* Object is selected. */
   BASE_HIDDEN = (1 << 8),   /* Object is hidden for editing. */
+  BASE_EXCLUDE_FROM_VIEW_LAYER = (1 << 12), /* Object is excluded from the view layer. */
 
   /* Runtime evaluated flags. */
 

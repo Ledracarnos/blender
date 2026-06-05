@@ -513,6 +513,9 @@ void _BKE_view_layer_synced_ensure_or_assert(const Main *bmain,
     for (_base = (Base *)BKE_view_layer_object_bases_get(_view_layer)->first; _base; \
          _base = _base->next) \
     { \
+      if ((_base->flag & BASE_EXCLUDE_FROM_VIEW_LAYER) != 0) { \
+        continue; \
+      } \
       _instance = _base->object;
 
 #define FOREACH_OBJECT_END \

@@ -315,6 +315,10 @@ static void outliner_object_set_flag_recursive_fn(bContext *C,
         ptr = RNA_pointer_create_discrete(&scene->id, RNA_ObjectBase, base_iter);
       }
       RNA_property_boolean_set(&ptr, base_or_object_prop, value);
+      if (!ob && STREQ(propname, "exclude")) {
+        BKE_base_eval_flags(static_cast<Base *>(ptr.data));
+        DEG_id_tag_update(&ob_iter->id, ID_RECALC_ANIMATION);
+      }
       animrig::autokeyframe_property(
           C, scene, &ptr, base_or_object_prop, -1, BKE_scene_frame_get(scene), true);
     }
@@ -326,8 +330,20 @@ static void outliner_object_set_flag_recursive_fn(bContext *C,
     DEG_relations_tag_update(bmain);
   }
   else {
-    BKE_view_layer_need_resync_tag(view_layer);
-    DEG_id_tag_update(&scene->id, ID_RECALC_BASE_FLAGS);
+    if (STREQ(propname, "exclude")) {
+      BKE_base_eval_flags(base);
+      DEG_id_tag_update(&scene->id, ID_RECALC_BASE_FLAGS);
+      DEG_relations_tag_update(bmain);
+      DEG_id_tag_update(&base->object->id, ID_RECALC_ANIMATION);
+      if ((base->flag & BASE_EXCLUDE_FROM_VIEW_LAYER) != 0 && view_layer->basact == base) {
+        view_layer->basact = nullptr;
+      }
+      WM_main_add_notifier(NC_SCENE | ND_LAYER_CONTENT, nullptr);
+    }
+    else {
+      BKE_view_layer_need_resync_tag(view_layer);
+      DEG_id_tag_update(&scene->id, ID_RECALC_BASE_FLAGS);
+    }
   }
 }
 
@@ -679,7 +695,9 @@ static void outliner_collection_set_flag_recursive_fn(bContext *C,
     /* If we are toggling Layer collections we still want to change the properties of the base
      * or the objects. If we have a matching property, toggle it as well, it can be nullptr. */
     struct_rna = collection ? RNA_Object : RNA_ObjectBase;
-    base_or_object_prop = RNA_struct_type_find_property(struct_rna, propname);
+    if (!STREQ(propname, "exclude")) {
+      base_or_object_prop = RNA_struct_type_find_property(struct_rna, propname);
+    }
   }
 
   if (extend) {
@@ -1026,7 +1044,7 @@ struct RestrictProperties {
   bool initialized;
 
   PropertyRNA *object_hide_viewport, *object_hide_select, *object_hide_render;
-  PropertyRNA *base_hide_viewport;
+  PropertyRNA *base_hide_viewport, *base_exclude;
   PropertyRNA *collection_hide_viewport, *collection_hide_select, *collection_hide_render;
   PropertyRNA *layer_collection_exclude, *layer_collection_holdout,
       *layer_collection_indirect_only, *layer_collection_hide_viewport;
@@ -1042,6 +1060,7 @@ struct RestrictPropertiesActive {
   bool object_hide_select;
   bool object_hide_render;
   bool base_hide_viewport;
+  bool base_exclude;
   bool collection_hide_viewport;
   bool collection_hide_select;
   bool collection_hide_render;
@@ -1135,6 +1154,24 @@ static void outliner_restrict_properties_enable_layer_collection_set(
   }
 }
 
+static void outliner_restrict_properties_enable_base_set(PointerRNA *base_ptr,
+                                                         RestrictProperties *props,
+                                                         RestrictPropertiesActive *props_active)
+{
+  if (props_active->base_exclude) {
+    props_active->base_exclude = !RNA_property_boolean_get(base_ptr, props->base_exclude);
+    if (!props_active->base_exclude) {
+      props_active->base_hide_viewport = false;
+      props_active->object_hide_select = false;
+      props_active->object_hide_viewport = false;
+      props_active->object_hide_render = false;
+      props_active->modifier_show_viewport = false;
+      props_active->modifier_show_render = false;
+      props_active->constraint_enable = false;
+    }
+  }
+}
+
 static bool outliner_restrict_properties_collection_set(Scene *scene,
                                                         TreeElement *te,
                                                         PointerRNA *collection_ptr,
@@ -1186,6 +1223,7 @@ static void outliner_draw_restrictbuts(ui::Block *block,
     props.object_hide_select = RNA_struct_type_find_property(RNA_Object, "hide_select");
     props.object_hide_render = RNA_struct_type_find_property(RNA_Object, "hide_render");
     props.base_hide_viewport = RNA_struct_type_find_property(RNA_ObjectBase, "hide_viewport");
+    props.base_exclude = RNA_struct_type_find_property(RNA_ObjectBase, "exclude");
     props.collection_hide_viewport = RNA_struct_type_find_property(RNA_Collection,
                                                                    "hide_viewport");
     props.collection_hide_select = RNA_struct_type_find_property(RNA_Collection, "hide_select");
@@ -1287,13 +1325,36 @@ static void outliner_draw_restrictbuts(ui::Block *block,
       else if ((tselem->type == TSE_SOME_ID) && (te.idcode == ID_OB)) {
         Object *ob = id_cast<Object *>(tselem->id);
         PointerRNA ptr = RNA_id_pointer_create(&ob->id);
+        PointerRNA base_ptr = PointerRNA_NULL;
+        BKE_view_layer_synced_ensure(bmain, scene, view_layer);
+        Base *base = (te.directdata) ? static_cast<Base *>(te.directdata) :
+                                       BKE_view_layer_base_find(view_layer, ob);
+        if (base != nullptr) {
+          base_ptr = RNA_pointer_create_discrete(&scene->id, RNA_ObjectBase, base);
+          outliner_restrict_properties_enable_base_set(&base_ptr, &props, &props_active);
+        }
+
+        if ((space_outliner->show_restrict_flags & SO_RESTRICT_ENABLE) && base != nullptr) {
+          bt = uiDefIconButR_prop(block,
+                                  ui::ButtonType::IconToggle,
+                                  ICON_NONE,
+                                  int(region->v2d.cur.xmax - restrict_offsets.enable),
+                                  te.ys,
+                                  UI_UNIT_X,
+                                  UI_UNIT_Y,
+                                  &base_ptr,
+                                  props.base_exclude,
+                                  -1,
+                                  0,
+                                  0,
+                                  TIP_("Exclude from view layer\n"
+                                       " • Shift to set children"));
+          button_func_set(bt, outliner__base_set_flag_recursive_fn, base, (void *)"exclude");
+          button_flag_enable(bt, ui::BUT_DRAG_LOCK);
+        }
 
         if (space_outliner->show_restrict_flags & SO_RESTRICT_HIDE) {
-          BKE_view_layer_synced_ensure(bmain, scene, view_layer);
-          Base *base = (te.directdata) ? static_cast<Base *>(te.directdata) :
-                                         BKE_view_layer_base_find(view_layer, ob);
           if (base) {
-            PointerRNA base_ptr = RNA_pointer_create_discrete(&scene->id, RNA_ObjectBase, base);
             bt = uiDefIconButR_prop(block,
                                     ui::ButtonType::IconToggle,
                                     ICON_NONE,
